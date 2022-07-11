@@ -76,6 +76,8 @@ class RosIO(Node):
         result = predict(converted_image)
         print(f'Predicted Segmentation')
 
+        # This code will change based on the result
+
         base = torch.zeros(result['masks'].shape[1:])
         for i in range(len(result['labels'])):
             base = base.masked_fill_(result['masks'][i] == 1, result['labels'][i])

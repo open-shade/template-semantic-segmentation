@@ -1,8 +1,9 @@
-import numpy
+import numpy as np
 import os
 from transformers import AutoFeatureExtractor, DetrForSegmentation
 import torch
 from PIL import Image as PilImage
+from palette import ade_palette
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
@@ -50,87 +51,61 @@ class RosIO(Node):
             1
         )
     
-        self.detection_publisher = self.create_publisher(
+        self.pixels_publisher = self.create_publisher(
             String,
-            '/<name>/pub/detection_boxes',
+            '/<name>/pub/pixels',
             1
         )
 
-    def get_detection_arr(self, result):
-        dda = Detection2DArray()
+        self.detection_publisher = self.create_publisher(
+            String,
+            '/<name>/pub/detections',
+            1
+        )
 
-        detections = []
-        self.counter += 1
-
-        ## Insert ROS Type Here 
-        ## Output from HF
-        '''
-        [{'labels': tensor([93, 17, 75, 75, 63, 17]),
-  'masks': tensor([[[1, 1, 1,  ..., 1, 1, 1],
-           [1, 1, 1,  ..., 1, 1, 1],
-           [0, 0, 1,  ..., 1, 1, 1],
-           ...,
-           [1, 1, 1,  ..., 1, 1, 1],
-           [1, 1, 1,  ..., 1, 1, 1],
-           [1, 1, 1,  ..., 1, 1, 1]],
-  
-          [[0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0],
-           ...,
-           [0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0]],
-  
-          [[0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0],
-           ...,
-           [0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0]],
-  
-          [[0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0],
-           ...,
-           [0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0]],
-  
-          [[1, 1, 1,  ..., 1, 1, 1],
-           [1, 1, 1,  ..., 1, 1, 1],
-           [1, 1, 1,  ..., 1, 1, 1],
-           ...,
-           [1, 1, 1,  ..., 1, 1, 1],
-           [1, 1, 1,  ..., 1, 1, 1],
-           [1, 1, 1,  ..., 1, 1, 1]],
-  
-          [[0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0],
-           ...,
-           [0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0],
-           [0, 0, 0,  ..., 0, 0, 0]]]),
-  'scores': tensor([0.9094, 0.9941, 0.9987, 0.9995, 0.9722, 0.9994],
-         grad_fn=<IndexBackward0>)}]
-        '''
-
+        self.mask_publisher = self.create_publisher(
+            String,
+            '/<name>/pub/mask',
+            1
+        )
 
     def listener_callback(self, msg: Image):
         bridge = CvBridge()
-        cv_image: numpy.ndarray = bridge.imgmsg_to_cv2(msg)
-        converted_image = PilImage.fromarray(numpy.uint8(cv_image), 'RGB')
+        cv_image: np.ndarray = bridge.imgmsg_to_cv2(msg)
+        converted_image = PilImage.fromarray(np.uint8(cv_image), 'RGB')
         result = predict(converted_image)
-        print(f'Predicted Bounding Boxes')
+        print(f'Predicted Segmentation')
 
+        base = torch.zeros(result['masks'].shape[1:])
+        for i in range(len(result['labels'])):
+            base = base.masked_fill_(result['masks'][i] == 1, result['labels'][i])
+
+        pixels = base.numpy().astype(np.uint8)
+
+        if self.get_parameter('pub_pixels').value:
+            pixel_output = bridge.cv2_to_imgsmg(pixels, encoding="mono8")
+            self.pixels_publisher.publish(pixel_output)
+        
+        color_seg = np.zeros((base.shape[0], base.shape[1], 3), dtype=np.uint8)
+        color_seg = color_seg[..., ::-1]
+
+        palette = np.array(ade_palette())
+        for label, color in enumerate(palette):
+            color_seg[base == label, :] = color
+            
         if self.get_parameter('pub_image').value:
-            self.image_publisher.publish(msg)
+            img = np.uint8(cv_image) * 0.5 + color_seg * 0.5
+            img_output = bridge.cv2_to_imgsmg(img)
+            self.image_publisher.publish(img_output)
 
-        if self.get_parameter('pub_boxes').value:
-            detections = self.get_detection_arr(result)
-            self.detection_publisher.publish(detections)
+        if self.get_parameter('pub_masks').value:
+            mask_output = bridge.cv2_to_imgsmg(color_seg)
+            self.mask_publisher.publish(mask_output)
+        
+
+        if self.get_parameter('pub_detections').value:
+            result = ' '.join(result['labels'].tolist())
+            self.detection_publisher.publish(result)
 
         
 
